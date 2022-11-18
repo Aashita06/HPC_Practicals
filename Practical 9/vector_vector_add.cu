@@ -1,144 +1,96 @@
-%%cu
-#include <math.h>
-#include <time.h>
-#include <iostream>
-#include <stdexcept>
-#include "cuda_runtime.h"
+#include <stdio.h>
 
-// declare the vectors' number of elements and their size in bytes
-static const int n_el = 10000000; // 10 millions
-static const size_t size = n_el * sizeof(float);
+/*
+ * Host function to initialize vector elements. This function
+ * simply initializes each element to equal its index in the
+ * vector.
+ */
 
-// function for computing sum on CPU
-void CPU_sum(const float* A, const float* B, float* C, int n_el) {
-  for (int i=0; i<n_el; i++) {
-    C[i]=A[i]+B[i];
-  }    
-}
-
-// kernel
-__global__ void kernel_sum(const float* A, const float* B, float* C, int n_el)
+void initWith(float num, float *a, int N)
 {
-  // calculate the unique thread index
-  int tid = blockDim.x * blockIdx.x + threadIdx.x;
-  // perform tid-th elements addition 
-  if (tid < n_el) C[tid] = A[tid] + B[tid];
+  for(int i = 0; i < N; ++i)
+  {
+    a[i] = num;
+  }
 }
 
-// function which invokes the kernel
-void GPU_sum(const float* A, const float* B, float* C, int n_el) {
+/*
+ * Device kernel stores into `result` the sum of each
+ * same-indexed value of `a` and `b`.
+ */
 
-  // declare the number of blocks per grid and the number of threads per block
-  int threadsPerBlock,blocksPerGrid;
+__global__
+void addVectorsInto(float *result, float *a, float *b, int N)
+{
+  int index = threadIdx.x + blockIdx.x * blockDim.x;
+  int stride = blockDim.x * gridDim.x;
 
-  // use max 512 threads per block
-  threadsPerBlock = min(512,n_el);
-  blocksPerGrid   = ceil(double(n_el)/double(threadsPerBlock));
-
-  // invoke the kernel
-  kernel_sum<<<blocksPerGrid,threadsPerBlock>>>(A, B, C, n_el);
+  for(int i = index; i < N; i += stride)
+  {
+    result[i] = a[i] + b[i];
+  }
 }
 
-int main(){
-  // declare and allocate input vectors h_A and h_B in the host (CPU) memory
-  float* h_A = (float*)malloc(size);
-  float* h_B = (float*)malloc(size);
-  float* h_C = (float*)malloc(size);
+/*
+ * Host function to confirm values in `vector`. This function
+ * assumes all values are the same `target` value.
+ */
 
-  // initialize input vectors
-  for (int i=0; i<n_el; i++){
-    h_A[i]=sin(i);
-    h_B[i]=cos(i);
+void checkElementsAre(float target, float *vector, int N)
+{
+  for(int i = 0; i < N; i++)
+  {
+    if(vector[i] != target)
+    {
+      printf("FAIL: vector[%d] - %0.0f does not equal %0.0f\n", i, vector[i], target);
+      exit(1);
+    }
   }
+  printf("Success! All values calculated correctly.\n");
+}
 
-  /************ CPU Version ***********/
+int main()
+{
+  const int N = 2<<24;
+  size_t size = N * sizeof(float);
 
-  clock_t tstart,tend;
-  float cpu_duration;
-  // compute on CPU
-  tstart = clock();
-  
-  /////////////////////////////////
-  // call kernel function
-  /////////////////////////////////
-  CPU_sum(h_A, h_B, h_C, n_el);
-  /////////////////////////////////
+  float *a;
+  float *b;
+  float *c;
 
-  tend = clock();
-  cpu_duration = ((float)(tend-tstart))/CLOCKS_PER_SEC;
-  printf("Total  time for sum on CPU: %f seconds\n",cpu_duration);
+  cudaMallocManaged(&a, size);
+  cudaMallocManaged(&b, size);
+  cudaMallocManaged(&c, size);
 
-  /************ GPU Version ***********/
+  initWith(3, a, N);
+  initWith(4, b, N);
+  initWith(0, c, N);
 
-  clock_t tstart_total;
-  tstart_total = clock();
+  size_t threadsPerBlock;
+  size_t numberOfBlocks;
 
-  /////////////////////////////////
-  // transfer data from CPU to GPU
-  /////////////////////////////////
-  // declare device vectors in the device (GPU) memory
-  float *d_A,*d_B,*d_C;
-  // allocate device vectors in the device (GPU) memory
-  cudaMalloc(&d_A, size);
-  cudaMalloc(&d_B, size);
-  cudaMalloc(&d_C, size);
-  // copy input vectors from the host (CPU) memory to the device (GPU) memory
-  cudaMemcpy(d_A, h_A, size, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_B, h_B, size, cudaMemcpyHostToDevice);
+  /*
+   * nsys should register performance changes when execution configuration
+   * is updated.
+   */
 
-  float gpu_duration;
-  tstart = clock();
+  threadsPerBlock = 1;
+  numberOfBlocks =16;
 
-  /////////////////////////////////
-  // call kernel function
-  /////////////////////////////////
-  GPU_sum(d_A, d_B, d_C, n_el);
-  // wait for everything to finish
-  cudaDeviceSynchronize();
-  /////////////////////////////////
+  cudaError_t addVectorsErr;
+  cudaError_t asyncErr;
 
-  tend = clock();
-  gpu_duration = ((float)(tend-tstart))/CLOCKS_PER_SEC;
-  printf("Kernel time for sum on GPU: %f seconds\n",gpu_duration);
+  addVectorsInto<<<numberOfBlocks, threadsPerBlock>>>(c, a, b, N);
 
-  /////////////////////////////////
-  // transfer data from GPU to CPU
-  /////////////////////////////////
-  // copy the output (results) vector from the device (GPU) memory to the host (CPU) memory
-  cudaMemcpy(h_C, d_C, size, cudaMemcpyDeviceToHost);
-  // free device memory
-  cudaFree(d_A);
-  cudaFree(d_B);
-  cudaFree(d_C);
+  addVectorsErr = cudaGetLastError();
+  if(addVectorsErr != cudaSuccess) printf("Error: %s\n", cudaGetErrorString(addVectorsErr));
 
-  // wait for everything to finish
-  cudaDeviceSynchronize();
+  asyncErr = cudaDeviceSynchronize();
+  if(asyncErr != cudaSuccess) printf("Error: %s\n", cudaGetErrorString(asyncErr));
 
-  tend = clock();
-  gpu_duration = ((float)(tend-tstart_total))/CLOCKS_PER_SEC;
-  printf("Total  time for sum on GPU: %f seconds\n",gpu_duration);
+  checkElementsAre(7, c, N);
 
-  /************ Check correctness using RMS Error ***********/
-
-  // compute the squared error of the result
-  // using double precision for good accuracy
-  double err=0;
-  for (int i=0; i<n_el; i++) {
-    double diff=double((h_A[i]+h_B[i])-h_C[i]);
-    err+=diff*diff;
-    // print results for manual checking.
-    //printf("%f=%f,",h_A[i]+h_B[i],h_C[i]);
-  }
-  // compute the RMS error
-  err=sqrt(err/double(n_el));
-  printf("error: %f\n",err);
-
-  printf("speed-up: %.2fx",cpu_duration/gpu_duration);
-
-  // free host memory
-  free(h_A);
-  free(h_B);
-  free(h_C);
-
-  return 0;
+  cudaFree(a);
+  cudaFree(b);
+  cudaFree(c);
 }
